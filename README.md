@@ -4,7 +4,7 @@
 
 Give your Mac a shot at the next Bitcoin block. The miner gets work from your own Bitcoin Core node and searches for a valid hash using ARM SHA-256 instructions, the Metal GPU, or both. The local dashboard lets you watch the hash rate, see how many attempts you've made, and follow block submissions.
 
-[Quick start](#quick-start) · [Documentation](DOCS.md) · [Benchmarks](#mining-benchmarks) · [MIT License](LICENSE)
+[Quick start](#quick-start) · [Documentation](DOCS.md) · [Benchmarks](#mining-benchmarks) · [Solo mining odds](#solo-mining-odds) · [MIT License](LICENSE)
 
 [![Bitcoin mainnet dashboard in hybrid mode on an Apple M5 Pro, showing 1.42 GH/s total, separate CPU and GPU hash-rate curves, and the mining attempts counter.](docs/images/dashboard-mainnet.png)](docs/images/dashboard-mainnet.png)
 
@@ -51,6 +51,12 @@ On this M5 Pro, adding four CPU workers gave the highest hash rate, and GPU-only
 | Metal + 4 CPU workers (`utility`) | 1.2175 | 52.26 W |
 
 [Full results, methodology, and commands to reproduce the benchmarks](DOCS.md#mining-benchmarks)
+
+## Solo mining odds
+
+At a hypothetical Bitcoin difficulty of 150 trillion, mining continuously at 1.28 GH/s for one year gives roughly a **1 in 16 million** chance of finding at least one mainnet block. This estimate assumes constant hash rate and difficulty throughout the year.
+
+The benchmark estimates SoC power. To estimate electricity cost, measure the Mac's energy use at the outlet and multiply the kWh by your electricity rate.
 
 ## Contributing
 

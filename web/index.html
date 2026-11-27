@@ -1,0 +1,122 @@
+<!doctype html>
+<html lang="en-US">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Bitcoin Silicon</title>
+  <link rel="stylesheet" href="/style.css">
+  <script defer src="/app.js"></script>
+</head>
+<body>
+  <main class="shell">
+    <div class="heading">
+      <div>
+        <h1>bitcoin-silicon</h1>
+        <div class="machine"><span id="metal-dot" class="dot"></span><span id="metal">Detecting Metal…</span></div>
+      </div>
+      <div id="session-badge" class="session-badge"><span class="dot"></span><span id="session-state">Idle</span></div>
+    </div>
+    <div class="workspace">
+      <section class="panel setup" aria-labelledby="setup-title">
+        <h2 id="setup-title">Mining session</h2>
+        <form id="session-form">
+          <fieldset id="session-fields">
+            <legend class="visually-hidden">Session settings</legend>
+            <div class="select-grid">
+              <label>Engine
+                <span class="engine-select">
+                  <select id="mode">
+                    <option value="gpu">GPU only · Metal</option>
+                    <option value="hybrid">CPU + GPU</option>
+                    <option value="cpu">CPU only</option>
+                  </select>
+                </span>
+              </label>
+              <label>CPU threads
+                <input id="threads" type="number" min="1" disabled required>
+              </label>
+            </div>
+            <label id="gpu-batch-field" hidden>Maximum Metal batch size
+              <input id="gpu-batch" type="number" min="1" max="16777216" value="1048576" required>
+            </label>
+          </fieldset>
+          <div class="destination">
+            <div class="subheading">Reward destination</div>
+            <fieldset id="address-settings">
+              <legend class="visually-hidden">Address settings</legend>
+              <div class="wallet-actions">
+                <button type="button" class="secondary" id="existing">Use an existing address</button>
+                <button type="button" class="secondary" id="wallet">Create a wallet</button>
+              </div>
+              <div class="address-input">
+                <input id="address" type="text" aria-label="Public receiving address" placeholder="Public receiving address" autocomplete="off" spellcheck="false" maxlength="128">
+                <button type="button" class="secondary" id="save-address">Validate</button>
+              </div>
+            </fieldset>
+            <div id="confirmed" class="confirmed" hidden>
+              <span id="confirmation-label">Destination address</span>
+              <output id="confirmed-address"></output>
+              <section class="balance-panel" id="balance-panel" aria-labelledby="balance-title" hidden>
+                <div class="panel-head"><h3 id="balance-title">Address balance</h3><button type="button" class="secondary" id="check-balance">Check balance</button></div>
+                <p class="backend-status" id="balance-status" role="status"></p>
+                <dl class="balance-values" id="balance-values" hidden>
+                  <div><dt>Total confirmed balance</dt><dd id="balance-total"></dd></div>
+                  <div><dt>Includes unspent rewards</dt><dd id="balance-coinbase"></dd></div>
+                  <div><dt>Includes immature rewards</dt><dd id="balance-immature"></dd></div>
+                </dl>
+                <p class="backend-status" id="balance-reward" hidden></p>
+              </section>
+            </div>
+            <p id="wallet-status" role="status" hidden></p>
+          </div>
+          <p class="error" id="form-error" role="alert" hidden></p>
+          <button class="primary" type="submit" id="start" disabled>Start mining <span aria-hidden="true">→</span></button>
+        </form>
+        <button class="secondary stop-button" type="button" id="stop" hidden>Stop mining</button>
+      </section>
+
+      <section class="monitor" aria-labelledby="monitor-title">
+        <h2 id="monitor-title" class="visually-hidden">Mining progress</h2>
+        <div class="rates">
+          <article class="panel rate"><span class="label"><i class="legend cpu"></i> CPU hash rate</span><div><output id="cpu-rate">—</output><span class="unit" id="cpu-unit"></span></div></article>
+          <article class="panel rate"><span class="label"><i class="legend gpu"></i> GPU hash rate</span><div><output id="gpu-rate">—</output><span class="unit" id="gpu-unit"></span></div></article>
+          <article class="panel rate total"><span class="label">Total hash rate</span><div><output id="total-rate">—</output><span class="unit" id="total-unit"></span></div></article>
+        </div>
+        <section class="panel chart-panel" aria-labelledby="chart-title">
+          <div class="panel-head"><h3 id="chart-title">Session hash rate</h3><span class="label">Last 60 seconds</span></div>
+          <canvas id="chart" aria-label="CPU and GPU hash rate history"></canvas>
+        </section>
+        <section class="panel nonce-panel" id="nonce-panel" aria-labelledby="nonce-title" hidden>
+          <div class="panel-head"><h3 id="nonce-title">Mining attempts</h3><span class="label" id="nonce-context"></span></div>
+          <p class="nonce-count" id="nonce-count"></p>
+          <p class="backend-status">Each attempt has the same chance of finding a valid block.</p>
+        </section>
+        <section class="panel backend" aria-labelledby="backend-title">
+          <div class="panel-head"><h3 id="backend-title">Bitcoin Core node</h3><span class="tag">MAINNET</span></div>
+          <p id="backend-status" class="backend-status" role="status">Querying Bitcoin Core…</p>
+          <p id="engine-config" hidden></p>
+          <p id="block-changes" hidden></p>
+          <div id="node-data" hidden>
+            <div class="sync-line"><span id="node-height"></span><span id="node-pct"></span></div>
+            <progress id="sync" max="100" value="0" aria-label="Sync progress"></progress>
+          </div>
+        </section>
+      </section>
+    </div>
+
+    <section class="panel submissions" aria-labelledby="sub-title">
+      <h3 id="sub-title">Block submissions</h3>
+      <div class="counters">
+        <div><span>Accepted</span><output id="accepted">0</output></div>
+        <div><span>Rejected</span><output id="rejected">0</output></div>
+        <div><span>Stale</span><output id="stale">0</output></div>
+        <div id="unconfirmed-wrap" hidden><span>Unanswered</span><output id="unconfirmed">0</output></div>
+      </div>
+      <div id="last-submission" class="last-submission" role="status">No submissions for this session.</div>
+      <p id="submitted-reward" class="backend-status" hidden></p>
+    </section>
+
+    <footer><span>Silicon Miner <span id="version"></span></span><span id="sha">SHA‑256d</span><span id="loopback">127.0.0.1</span></footer>
+  </main>
+</body>
+</html>

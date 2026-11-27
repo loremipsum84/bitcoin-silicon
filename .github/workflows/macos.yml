@@ -1,0 +1,147 @@
+name: macOS CI and release
+
+on:
+  pull_request:
+    branches: [main, dev]
+  push:
+    branches: [dev]
+    tags: ['v*']
+
+permissions:
+  contents: read
+
+jobs:
+  macos:
+    name: macOS arm64
+    runs-on: macos-15
+    timeout-minutes: 20
+    env:
+      MACOSX_DEPLOYMENT_TARGET: '13.0'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: ${{ github.ref_type == 'tag' && '0' || '1' }}
+          persist-credentials: false
+
+      - name: Verify release tag
+        if: github.ref_type == 'tag'
+        shell: bash
+        run: |
+          if ! git merge-base --is-ancestor HEAD origin/main; then
+            echo 'Release tags must point to a commit in main.' >&2
+            exit 1
+          fi
+
+          version=$(cargo metadata --locked --no-deps --format-version 1 |
+            jq -er '.packages[] | select(.name == "bitcoin-silicon") | .version')
+          if [[ "$GITHUB_REF_NAME" != "v$version" ]]; then
+            printf 'Tag %s must match Cargo version v%s.\n' "$GITHUB_REF_NAME" "$version" >&2
+            exit 1
+          fi
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Run Clippy
+        run: cargo clippy --locked --all-targets -- -D warnings
+
+      - name: Run Rust tests
+        run: cargo test --locked
+
+      - name: Build miner and wallet assistant
+        run: make build
+
+      - name: Test Stratum on CPU
+        run: |
+          state_dir=$(mktemp -d "$RUNNER_TEMP/stratum.XXXXXX")
+          export SILICON_STATE_DIR="$state_dir"
+          python3 -B tests/stratum.py ./target/release/bitcoin-silicon cpu
+
+      - name: Test SegWit in regtest
+        if: github.ref_type == 'tag'
+        shell: bash
+        run: |
+          make install-bitcoin-core
+          binary=./target/release/bitcoin-silicon
+          state_dir=$(mktemp -d "$RUNNER_TEMP/regtest.XXXXXX")
+          export SILICON_STATE_DIR="$state_dir"
+          export SILICON_REGTEST_RPC_PORT=28443
+          trap '"$binary" node stop regtest' EXIT
+          python3 -B tests/regtest_segwit.py "$binary"
+
+      - name: Package and verify macOS archive
+        id: package
+        if: github.ref_type == 'tag'
+        shell: bash
+        run: |
+          archive="$RUNNER_TEMP/bitcoin-silicon-${GITHUB_REF_NAME}-macos-arm64.tar.gz"
+          unpacked=$(mktemp -d "$RUNNER_TEMP/release-check.XXXXXX")
+          wallet='Silicon Wallet.app'
+
+          COPYFILE_DISABLE=1 tar -czf "$archive" \
+            -C target/release bitcoin-silicon "$wallet" \
+            -C "$GITHUB_WORKSPACE" LICENSE
+          tar -xzf "$archive" -C "$unpacked"
+
+          assistant="$unpacked/$wallet/Contents/MacOS/wallet-assistant"
+          test -x "$unpacked/bitcoin-silicon"
+          test -x "$assistant"
+          test -f "$unpacked/$wallet/Contents/Info.plist"
+          cmp LICENSE "$unpacked/LICENSE"
+          lipo -verify_arch arm64 "$unpacked/bitcoin-silicon"
+          lipo -verify_arch arm64 "$assistant"
+          codesign --verify --strict "$unpacked/bitcoin-silicon"
+          codesign --verify --strict "$unpacked/$wallet"
+          printf 'archive=%s\n' "$archive" >> "$GITHUB_OUTPUT"
+
+      - name: Upload macOS archive for the release job
+        if: github.ref_type == 'tag'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: macos-arm64-release
+          path: ${{ steps.package.outputs.archive }}
+          if-no-files-found: error
+          overwrite: true
+
+  draft-release:
+    name: Prepare GitHub release draft
+    needs: macos
+    if: github.ref_type == 'tag'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    concurrency:
+      group: release-${{ github.ref }}
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: macos-arm64-release
+          path: release-assets
+
+      - name: Attach archive to draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        shell: bash
+        run: |
+          archive_name="bitcoin-silicon-${GITHUB_REF_NAME}-macos-arm64.tar.gz"
+          archive="release-assets/$archive_name"
+          release_state=$(gh api --paginate "repos/$GH_REPO/releases?per_page=100" |
+            jq -r --arg tag "$GITHUB_REF_NAME" --arg asset "$archive_name" '
+              .[] | select(.tag_name == $tag) |
+              if .draft == false then "published"
+              elif any(.assets[]; .name == $asset and .state == "uploaded") then "ready"
+              else "draft"
+              end')
+
+          case "$release_state" in
+            published) echo 'The release is already published.' ;;
+            ready) echo 'The draft already has the macOS archive.' ;;
+            draft) gh release upload "$GITHUB_REF_NAME" "$archive" --clobber ;;
+            '')
+              gh release create "$GITHUB_REF_NAME" "$archive" --verify-tag --draft \
+                --title "$GITHUB_REF_NAME" --generate-notes
+              ;;
+            *) echo 'Multiple releases match this tag.' >&2; exit 1 ;;
+          esac

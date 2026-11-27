@@ -88,8 +88,8 @@ jobs:
           test -x "$assistant"
           test -f "$unpacked/$wallet/Contents/Info.plist"
           cmp LICENSE "$unpacked/LICENSE"
-          lipo -verify_arch arm64 "$unpacked/bitcoin-silicon"
-          lipo -verify_arch arm64 "$assistant"
+          lipo "$unpacked/bitcoin-silicon" -verify_arch arm64
+          lipo "$assistant" -verify_arch arm64
           codesign --verify --strict "$unpacked/bitcoin-silicon"
           codesign --verify --strict "$unpacked/$wallet"
           printf 'archive=%s\n' "$archive" >> "$GITHUB_OUTPUT"

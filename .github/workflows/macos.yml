@@ -57,11 +57,16 @@ jobs:
           export SILICON_STATE_DIR="$state_dir"
           python3 -B tests/stratum.py ./target/release/bitcoin-silicon cpu
 
+      - name: Install Bitcoin Core
+        run: make install-bitcoin-core
+
+      - name: Test encrypted wallet backup and restore
+        run: python3 -B tests/wallet.py ./target/release/bitcoin-silicon
+
       - name: Test SegWit in regtest
         if: github.ref_type == 'tag'
         shell: bash
         run: |
-          make install-bitcoin-core
           binary=./target/release/bitcoin-silicon
           state_dir=$(mktemp -d "$RUNNER_TEMP/regtest.XXXXXX")
           export SILICON_STATE_DIR="$state_dir"

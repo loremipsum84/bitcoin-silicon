@@ -98,6 +98,7 @@ fn main() -> Result<()> {
             )
         }
         Some("bench") => benchmark::command(&args[1..]),
+        Some("bench-solo") => benchmark::solo_command(&args[1..], shutdown_flag()?),
         Some("metal-test") => {
             ensure!(args.len() == 1, "Usage: bitcoin-silicon metal-test");
             metal_test()

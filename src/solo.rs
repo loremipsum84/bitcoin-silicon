@@ -488,6 +488,18 @@ struct Search {
     resumed: bool,
 }
 
+fn engine_work(tpl: &Template, benchmark_nonces: Option<u64>) -> (Target, Range<u64>) {
+    match benchmark_nonces {
+        Some(count) => (
+            // Preserve the regtest block and its real proposal. This search
+            // target makes finding a candidate practically impossible.
+            Target([0; 32]),
+            tpl.nonce_range.start..(tpl.nonce_range.start + count).min(tpl.nonce_range.end),
+        ),
+        None => (tpl.target, tpl.nonce_range.clone()),
+    }
+}
+
 impl Search {
     fn message(&self) -> String {
         format!(
@@ -501,6 +513,7 @@ impl Search {
         engine: &mut Engine,
         checkpoint: &mut Checkpoint,
         status: &mut Progress,
+        benchmark_nonces: Option<u64>,
     ) -> Result<Self> {
         let Prepared {
             tpl,
@@ -514,13 +527,8 @@ impl Search {
         checkpoint.save(seed, extra, &work, previous_tested, &coverage)?;
         status.height = Some(tpl.height);
         status.nonces = Some(NonceProgress::new(&coverage, previous_tested, resumed));
-        let id = engine.set_with_coverage(
-            work.header,
-            tpl.target,
-            tpl.nonce_range.clone(),
-            true,
-            coverage,
-        )?;
+        let (target, range) = engine_work(&tpl, benchmark_nonces);
+        let id = engine.set_with_coverage(work.header, target, range, true, coverage)?;
         Ok(Self {
             tpl,
             work,
@@ -556,16 +564,205 @@ impl Search {
     }
 }
 
+#[derive(Serialize)]
+struct Gap {
+    #[serde(skip)]
+    exhausted_at: Instant,
+    #[serde(skip)]
+    phase_started: Instant,
+    kind: &'static str,
+    idle_ms: f64,
+    detection_ms: f64,
+    checkpoint_ms: f64,
+    work_ms: Option<f64>,
+    proposal_ms: Option<f64>,
+    publish_ms: Option<f64>,
+    refresh_ms: Option<f64>,
+}
+
+impl Gap {
+    fn new(exhausted_at: Instant) -> Self {
+        let observed_at = Instant::now();
+        Self {
+            exhausted_at,
+            phase_started: observed_at,
+            kind: "rollover",
+            idle_ms: 0.0,
+            detection_ms: (observed_at - exhausted_at).as_secs_f64() * 1000.0,
+            checkpoint_ms: 0.0,
+            work_ms: None,
+            proposal_ms: None,
+            publish_ms: None,
+            refresh_ms: None,
+        }
+    }
+
+    fn step(&mut self) -> f64 {
+        let now = Instant::now();
+        let elapsed = now - self.phase_started;
+        self.phase_started = now;
+        elapsed.as_secs_f64() * 1000.0
+    }
+}
+
+struct Sample {
+    time: Instant,
+    cpu: u64,
+    gpu: u64,
+}
+
+impl Sample {
+    fn read(engine: &Engine, time: Instant) -> Self {
+        let (cpu, gpu, _) = engine.counts();
+        Self { time, cpu, gpu }
+    }
+}
+
+struct Benchmark<'a> {
+    directory: &'a Path,
+    warmup: Duration,
+    duration: Duration,
+    nonce_count: u64,
+    first_work: Option<Instant>,
+    start: Option<Sample>,
+    end: Option<Sample>,
+    templates: Vec<Value>,
+    gaps: Vec<Gap>,
+    refresh: Option<Gap>,
+}
+
+impl Benchmark<'_> {
+    fn tick(&mut self, engine: &Engine) -> bool {
+        let Some(first_work) = self.first_work else {
+            return false;
+        };
+        let now = Instant::now();
+        if let Some(start) = &self.start {
+            if now - start.time >= self.duration {
+                self.end = Some(Sample::read(engine, now));
+                return true;
+            }
+        } else if now - first_work >= self.warmup {
+            self.start = Some(Sample::read(engine, now));
+        }
+        false
+    }
+
+    fn template_installed(&mut self, template: &Template) {
+        self.first_work.get_or_insert_with(Instant::now);
+        self.templates.push(json!({
+            "transactions": template.transactions.len(),
+            "transaction_weight": template.weight,
+        }));
+        if let Some(mut gap) = self.refresh.take() {
+            gap.kind = "refresh";
+            gap.refresh_ms = Some(gap.step());
+            self.record_gap(gap);
+        }
+    }
+
+    fn record_gap(&mut self, mut gap: Gap) {
+        if self
+            .start
+            .as_ref()
+            .is_some_and(|start| start.time <= gap.exhausted_at)
+        {
+            gap.idle_ms = (gap.phase_started - gap.exhausted_at).as_secs_f64() * 1000.0;
+            self.gaps.push(gap);
+        }
+    }
+
+    fn result(self) -> Result<Value> {
+        let start = self
+            .start
+            .context("Solo benchmark did not finish warming up")?;
+        let end = self.end.context("Solo benchmark was interrupted")?;
+        let seconds = (end.time - start.time).as_secs_f64();
+        let cpu = end.cpu - start.cpu;
+        let gpu = end.gpu - start.gpu;
+        let rollovers = self
+            .gaps
+            .iter()
+            .filter(|gap| gap.kind == "rollover")
+            .count();
+        ensure!(
+            rollovers >= 2,
+            "Solo benchmark observed {rollovers} extranonce rollovers. Use a longer duration."
+        );
+        Ok(json!({
+            "seconds": seconds,
+            "useful_hs": (cpu + gpu) as f64 / seconds,
+            "cpu_nonces": cpu,
+            "gpu_nonces": gpu,
+            "nonces": cpu + gpu,
+            "nonce_count": self.nonce_count,
+            "templates": self.templates,
+            "refreshes": self.gaps.len() - rollovers,
+            "rollovers": rollovers,
+            "gaps": self.gaps,
+        }))
+    }
+}
+
 pub fn run(
+    state: &Path,
+    chain: Chain,
+    address: &Address,
+    engine: Engine,
+    cancel: &AtomicBool,
+    report: &mut impl FnMut(&Progress),
+) -> Result<()> {
+    run_inner(state, chain, address, engine, cancel, report, None)
+}
+
+pub fn benchmark(
+    state: &Path,
+    engine: Engine,
+    cancel: &AtomicBool,
+    warmup: Duration,
+    duration: Duration,
+    nonce_count: u64,
+) -> Result<Value> {
+    fs::create_dir_all(state)?;
+    let directory = tempfile::tempdir_in(state)?;
+    let mut benchmark = Benchmark {
+        directory: directory.path(),
+        warmup,
+        duration,
+        nonce_count,
+        first_work: None,
+        start: None,
+        end: None,
+        templates: Vec::new(),
+        gaps: Vec::new(),
+        refresh: None,
+    };
+    let chain = Chain::Regtest;
+    run_inner(
+        state,
+        chain,
+        &chain.demo_address(),
+        engine,
+        cancel,
+        &mut |_| (),
+        Some(&mut benchmark),
+    )?;
+    benchmark.result()
+}
+
+fn run_inner(
     state: &Path,
     chain: Chain,
     address: &Address,
     mut engine: Engine,
     cancel: &AtomicBool,
     report: &mut impl FnMut(&Progress),
+    mut benchmark: Option<&mut Benchmark<'_>>,
 ) -> Result<()> {
     let rpc = Rpc::new(state, chain)?;
-    let mut checkpoint = Checkpoint::open(state, chain, address)?;
+    let checkpoint_state = benchmark.as_ref().map_or(state, |value| value.directory);
+    let benchmark_nonces = benchmark.as_ref().map(|value| value.nonce_count);
+    let mut checkpoint = Checkpoint::open(checkpoint_state, chain, address)?;
     let mut status = Progress {
         backend: Some(chain.service().into()),
         ..Progress::default()
@@ -584,6 +781,12 @@ pub fn run(
 
     while !cancel.load(Relaxed) {
         engine.check_error()?;
+        if benchmark
+            .as_deref_mut()
+            .is_some_and(|value| value.tick(&engine))
+        {
+            break;
+        }
         if rates.update(&engine, &mut status) {
             if let Some(search) = &active {
                 search.save(&engine, &mut checkpoint, &mut status)?;
@@ -660,8 +863,16 @@ pub fn run(
                 })();
                 match updated {
                     Ok(prepared) => {
-                        let search =
-                            Search::start(prepared, &mut engine, &mut checkpoint, &mut status)?;
+                        let search = Search::start(
+                            prepared,
+                            &mut engine,
+                            &mut checkpoint,
+                            &mut status,
+                            benchmark_nonces,
+                        )?;
+                        if let Some(value) = benchmark.as_deref_mut() {
+                            value.template_installed(&search.tpl);
+                        }
                         restore_pending = false;
                         status.message = search.message();
                         active = Some(search);
@@ -695,6 +906,10 @@ pub fn run(
             continue;
         };
         if let Some(hit) = candidate {
+            ensure!(
+                benchmark.is_none(),
+                "Unexpected hash match in solo benchmark"
+            );
             if hit.work != search.id {
                 status.stale += 1;
                 continue;
@@ -787,9 +1002,19 @@ pub fn run(
             active = None;
             next_check = Instant::now();
         } else if exhausted {
+            let mut gap = benchmark
+                .as_ref()
+                .and_then(|_| engine.exhausted_at())
+                .map(Gap::new);
             search.save(&engine, &mut checkpoint, &mut status)?;
+            if let Some(gap) = gap.as_mut() {
+                gap.checkpoint_ms = gap.step();
+            }
             // Refresh between nonce ranges so an in-progress header can be resumed as-is.
             if Instant::now() >= refresh {
+                if let Some(value) = benchmark.as_deref_mut() {
+                    value.refresh = gap;
+                }
                 engine.clear();
                 active = None;
                 next_check = Instant::now();
@@ -797,17 +1022,26 @@ pub fn run(
             }
             let extra = search.extra.wrapping_add(1);
             let next = search.tpl.work(address, extra)?;
+            if let Some(gap) = gap.as_mut() {
+                gap.work_ms = Some(gap.step());
+            }
             match approve(&rpc, &search.tpl, &next) {
                 Ok(()) => {
+                    if let Some(gap) = gap.as_mut() {
+                        gap.proposal_ms = Some(gap.step());
+                    }
                     let coverage = Coverage::default();
                     let tested = checkpoint.tested_on(&display_hash(search.tpl.previous));
                     checkpoint.save(search.seed, extra, &next, tested, &coverage)?;
-                    search.id = engine.set(
-                        next.header,
-                        search.tpl.target,
-                        search.tpl.nonce_range.clone(),
-                        true,
-                    )?;
+                    if let Some(gap) = gap.as_mut() {
+                        gap.checkpoint_ms += gap.step();
+                    }
+                    let (target, range) = engine_work(&search.tpl, benchmark_nonces);
+                    search.id = engine.set(next.header, target, range, true)?;
+                    if let (Some(value), Some(mut gap)) = (benchmark.as_deref_mut(), gap) {
+                        gap.publish_ms = Some(gap.step());
+                        value.record_gap(gap);
+                    }
                     search.work = next;
                     search.extra = extra;
                     search.previous_tested = tested;
@@ -815,6 +1049,9 @@ pub fn run(
                     report(&status);
                 }
                 Err(error) => {
+                    if benchmark.is_some() {
+                        return Err(error).context("Could not validate solo benchmark proposal");
+                    }
                     engine.clear();
                     active = None;
                     next_check = Instant::now();

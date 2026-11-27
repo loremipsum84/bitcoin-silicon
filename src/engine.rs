@@ -13,7 +13,7 @@ use std::{
         Arc, Condvar, Mutex,
     },
     thread::{self, JoinHandle},
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 pub const MAX_THREADS: usize = 64;
@@ -219,6 +219,7 @@ struct Queue {
     coverage: Coverage,
     total: u64,
     in_flight: usize,
+    exhausted_at: Option<Instant>,
     paused: bool,
     closed: bool,
 }
@@ -278,6 +279,9 @@ impl Drop for Lease {
                 .coverage
                 .record(self.range.start..self.completed_until);
             queue.in_flight -= 1;
+            if queue.in_flight == 0 && queue.remaining.is_empty() {
+                queue.exhausted_at = Some(Instant::now());
+            }
             if queue.paused && queue.in_flight == 0 {
                 self.shared.wake.notify_all();
             }
@@ -376,6 +380,7 @@ impl Engine {
                 coverage: Coverage::default(),
                 total: 0,
                 in_flight: 0,
+                exhausted_at: None,
                 paused: false,
                 closed: false,
             }),
@@ -490,6 +495,7 @@ impl Engine {
         queue.remaining = coverage.gaps(range);
         queue.coverage = coverage;
         queue.in_flight = 0;
+        queue.exhausted_at = queue.remaining.is_empty().then(Instant::now);
         queue.paused = false;
         self.shared.wake.notify_all();
         Ok(self.id)
@@ -509,6 +515,10 @@ impl Engine {
     pub fn exhausted(&self) -> bool {
         let queue = self.shared.queue.lock().unwrap();
         queue.remaining.is_empty() && queue.in_flight == 0
+    }
+
+    pub fn exhausted_at(&self) -> Option<Instant> {
+        self.shared.queue.lock().unwrap().exhausted_at
     }
 
     pub fn coverage(&self) -> Option<(Coverage, u64)> {

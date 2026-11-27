@@ -1,11 +1,15 @@
 use crate::{
     engine::{configured_gpu_batch, default_threads, CpuQos, Engine, Mode},
     hash::{decode, Target, GENESIS},
-    metal,
+    metal, solo,
 };
 use anyhow::{bail, ensure, Context, Result};
 use serde::Serialize;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::{
+    path::PathBuf,
+    sync::atomic::AtomicBool,
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+};
 
 const USAGE: &str = "Usage: bitcoin-silicon bench [seconds] [warm-up] [gpu-batch] \
                     [cpu-only|cpu:N|gpu|hybrid:N] [--replace-ms milliseconds] [--json]";
@@ -357,5 +361,36 @@ pub fn command(args: &[String]) -> Result<()> {
             );
         }
     }
+    Ok(())
+}
+
+pub fn solo_command(args: &[String], cancel: &AtomicBool) -> Result<()> {
+    let [seconds, warmup, batch, profile, nonce_count] = args else {
+        bail!("Internal usage: bench-solo seconds warm-up gpu-batch profile nonce-count");
+    };
+    let seconds = seconds.parse()?;
+    let warmup = warmup.parse()?;
+    ensure!(
+        (1..=1800).contains(&seconds) && (1..=600).contains(&warmup),
+        "Benchmark durations are out of range"
+    );
+    let nonce_count = nonce_count.parse()?;
+    ensure!(
+        (1..=1u64 << 32).contains(&nonce_count),
+        "Benchmark nonce range is out of bounds"
+    );
+    let state = std::env::var_os("SILICON_STATE_DIR")
+        .map(PathBuf::from)
+        .context("bench-solo needs a SILICON_STATE_DIR for the isolated regtest node")?;
+    let profile = Profile::from_arg(profile)?;
+    let result = solo::benchmark(
+        &state,
+        Engine::start(profile.mode, profile.threads.max(1), batch.parse()?)?,
+        cancel,
+        Duration::from_secs(warmup),
+        Duration::from_secs(seconds),
+        nonce_count,
+    )?;
+    println!("{}", serde_json::to_string(&result)?);
     Ok(())
 }

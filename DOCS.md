@@ -132,6 +132,26 @@ target/release/bitcoin-silicon bench 60 10 4194304 gpu --replace-ms 500 --json
 
 `--replace-ms` schedules work replacements alongside normal nonce rollover. The JSON output includes the effective CPU worker QoS, measurement timestamps, useful hashes per second and GPU nonces discarded after work was replaced.
 
+### End-to-end solo mining
+
+Build the release binary and install Bitcoin Core with `make setup`. From the project root, run the engine benchmark and solo benchmark with the same profile, warm-up, duration, and GPU batch size.
+
+```sh
+python3 -B tools/solo_bench.py --profile gpu --seconds 60 --warmup 10 --gpu-batch 1048576
+```
+
+The script starts a temporary offline regtest node and fills its template with 20 SegWit transactions totalling about 3.44 million weight units. Core validates the complete block proposals. A benchmark-only engine target drives the solo loop through the full 32-bit nonce range multiple times, and the script checks the regtest tip hash after the run.
+
+Compare `engine.useful_hs`, `solo.useful_hs`, and `throughput_change_pct` for the two measured windows. `solo.gaps` measures the interval between the last completed lease for a header and publication of the next header. The JSON breaks down extranonce rollovers into detection, coinbase and Merkle construction, checkpoint writes, proposal serialization and RPC, and publication. Template refresh entries group retrieval, validation, and installation under `refresh_ms`.
+
+The script measures the engine first and the solo loop second. A single pair can reflect changes in machine load and temperature as well as the cost of the solo loop.
+
+Use a longer measurement window for slower hardware or CPU profiles so the run includes at least two full extranonce rollovers. For a quick CPU smoke test, use `--profile cpu:2 --seconds 3 --warmup 1 --nonce-count 1048576`. Shorter nonce ranges change how often the engine stalls and are useful for checking the fixture and timings.
+
+The command above measured 1.111 GH/s for the engine and 1.093 GH/s for solo mining on an Apple M5 Pro with Bitcoin Core 32.1.0, a 1.65% decrease. The 11 extranonce rollovers took a median of 38.65 ms. Detection took 13.40 ms, checkpoint writes 9.31 ms, and proposal serialization and RPC 15.64 ms, each measured as a median across rollovers. The four template refreshes took a median of 129.08 ms. Together, the recorded gaps occupied 1.64% of the solo measurement window.
+
+### Bitcoin Core sync
+
 Use the Python tools to measure a running node or compare database cache settings on temporary regtest nodes.
 
 ```sh
